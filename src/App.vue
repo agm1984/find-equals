@@ -1,7 +1,6 @@
 <script setup>
 import { ref, reactive, computed } from 'vue';
 import { evaluate } from 'mathjs'
-import cloneDeep from 'lodash.clonedeep';
 import { getPermutations, cycles } from './utils/permutations';
 
 const INITIAL = 'is-initial';
@@ -10,7 +9,6 @@ const COMPLETE = 'is-complete';
 const state = ref(INITIAL);
 const isInitial = computed(() => state.value === INITIAL);
 const isComputing = computed(() => state.value === COMPUTING);
-const isComplete = computed(() => state.value === COMPLETE);
 
 const options = reactive({
     inputs: [
@@ -23,351 +21,304 @@ const options = reactive({
     minAnswer: 1,
     maxAnswer: 100,
     allowDecimals: false,
+    allowConcatenation: true,
     showEquations: false,
+    maxResults: 2000, 
+    stopOnTarget: true, // NEW: Defaults to true
 });
 
 const availableNumbers = computed(() => options.inputs.map(x => x.value));
 const permutations = ref([]);
-
-// const operators = ['+', '-', '*', '/'];
 const operators = ['+', '-', '*', '/', '^'];
-
 const answers = ref([]);
-
 const validEquationsFound = ref(0);
+const processedCount = ref(0);
+const targetFoundFlag = ref(false); // Immediate stop flag
 
 const addInput = () => {
     options.inputs.push({ value: 0 });
 };
 
-const isTargetFound = computed(() => answers.value.some(result => result.answer === options.targetAnswer));
+const isTargetFound = computed(() => targetFoundFlag.value);
 
+/**
+ * 1. Evaluate Equation
+ */
 const tryEquation = (equation) => {
+    // If we already found the target and we are supposed to stop, do nothing.
+    if (targetFoundFlag.value && options.stopOnTarget) return;
+
     try {
         const answer = evaluate(equation);
 
-        const isLargerThanMin = (answer >= options.minAnswer);
-        const isSmallerThanMax = (answer <= options.maxAnswer);
-        const hasDecimal = (answer % 1 !== 0);
+        // Validate Basics
+        if (!isFinite(answer) || isNaN(answer)) return;
 
-        if (hasDecimal && !options.allowDecimals) return;
-
-        if (isLargerThanMin && isSmallerThanMax) {
-            answers.value.push({ equation, answer });
-            validEquationsFound.value += 1;
+        // CHECK TARGET FIRST (Before checking maxResults)
+        // This ensures we don't give up searching for "75" just because we found 1000 "74s"
+        if (Math.abs(answer - options.targetAnswer) < 0.000001) {
+             answers.value.unshift({ equation, answer }); // Put it at the top!
+             validEquationsFound.value += 1;
+             targetFoundFlag.value = true; // Signal to stop
+             return;
         }
+
+        // Validate Constraints
+        if ((answer % 1 !== 0) && !options.allowDecimals) return;
+        if (answer < options.minAnswer || answer > options.maxAnswer) return;
+
+        // Check Capacity
+        if (answers.value.length >= options.maxResults) return;
+
+        // Store standard result
+        answers.value.push({ equation, answer });
+        validEquationsFound.value += 1;
+
     } catch (error) {
-        // goto next
+        // Silent fail
     }
 };
 
-const handleGenerate = () => {
+/**
+ * 2. Generate Structural Templates
+ */
+const applyTemplates = (nums, ops) => {
+    if (targetFoundFlag.value && options.stopOnTarget) return; // Optimization check
+
+    const N = nums;
+    const O = ops;
+
+    // Helper to apply regex variations (factorials/roots)
+    const applyUnary = (eq) => {
+        tryEquation(eq);
+
+        // Only run expensive regex if we haven't found target yet
+        if (targetFoundFlag.value && options.stopOnTarget) return;
+
+        options.inputs.forEach(input => {
+            const val = String(input.value);
+            const regex = new RegExp(`(?<!\\d)${val}(?!\\d)`, 'g');
+            if (eq.match(regex)) {
+                tryEquation(eq.replace(regex, `${val}!`));
+                tryEquation(eq.replace(regex, `sqrt(${val})`));
+            }
+        });
+    }
+
+    // Dynamic Templates based on array length
+    if (N.length === 1) {
+        applyUnary(N[0]);
+    }
+    else if (N.length === 2) {
+        applyUnary(`${N[0]} ${O[0]} ${N[1]}`);
+    } 
+    else if (N.length === 3) {
+        applyUnary(`${N[0]}${O[0]}${N[1]}${O[1]}${N[2]}`);
+        applyUnary(`(${N[0]}${O[0]}${N[1]})${O[1]}${N[2]}`);
+        applyUnary(`${N[0]}${O[0]}(${N[1]}${O[1]}${N[2]})`);
+    } 
+    else if (N.length === 4) {
+        const base = `${N[0]}${O[0]}${N[1]}${O[1]}${N[2]}${O[2]}${N[3]}`;
+        applyUnary(base);
+        applyUnary(`(${N[0]}${O[0]}${N[1]})${O[1]}(${N[2]}${O[2]}${N[3]})`);
+        applyUnary(`((${N[0]}${O[0]}${N[1]})${O[1]}${N[2]})${O[2]}${N[3]}`);
+        applyUnary(`${N[0]}${O[0]}(${N[1]}${O[1]}(${N[2]}${O[2]}${N[3]}))`);
+    }
+};
+
+/**
+ * 3. Operator Looper
+ */
+const solveForNumbers = (numberList) => {
+    if (targetFoundFlag.value && options.stopOnTarget) return;
+
+    const len = numberList.length;
+
+    if (len === 1) {
+        tryEquation(numberList[0]);
+        return;
+    }
+
+    if (len === 2) {
+        for (let op1 of operators) applyTemplates(numberList, [op1]);
+    } else if (len === 3) {
+        for (let op1 of operators) {
+            for (let op2 of operators) applyTemplates(numberList, [op1, op2]);
+        }
+    } else if (len === 4) {
+        for (let op1 of operators) {
+            for (let op2 of operators) {
+                for (let op3 of operators) applyTemplates(numberList, [op1, op2, op3]);
+            }
+        }
+    }
+};
+
+/**
+ * MAIN GENERATOR
+ */
+const handleGenerate = async () => {
     state.value = COMPUTING;
+    answers.value = [];
+    validEquationsFound.value = 0;
+    cycles.value = 0;
+    processedCount.value = 0;
+    targetFoundFlag.value = false;
 
-    const operands = availableNumbers.value;
-    permutations.value = getPermutations([
-        // ...operators,
-        ...operands,
-        // ...['(', ')'],
-    ]);
+    const rawOperands = availableNumbers.value.map(String);
+    permutations.value = getPermutations(rawOperands);
 
-    // let potentialSolutions = [];
+    const totalPermutations = permutations.value.length;
+    let permIndex = 0;
 
-    // for (let i = 0; i < 2; i += 1) {
-    //     console.log('test', permutations.value[i], operators);
-    //     for (let y = 0; y < permutations.value[i].length; y += 1) {
-    //         for (let x = 0; x < operators.length; x += 1) {
-    //             let permutation = cloneDeep(permutations.value[i]);
-    //             permutation.splice(y, 0, operators[x]);
-    //             potentialSolutions.push(permutation);
-    //         }
-    //     }
-    // }
-    // console.log('solutions', potentialSolutions);
+    const processBatch = () => {
+        return new Promise((resolve) => {
+            const startTime = performance.now();
 
-    // return;
+            // Loop while: 
+            // 1. We have items
+            // 2. Time is under 15ms
+            // 3. We haven't found the target (if stopOnTarget is on)
+            while (
+                permIndex < totalPermutations && 
+                (performance.now() - startTime < 15) &&
+                !(options.stopOnTarget && targetFoundFlag.value)
+            ) {
 
-    permutations.value.forEach((permutation) => {
-        let equation = permutation.join('');
-        // console.log('equation', equation);
-        tryEquation(equation);
+                const p = permutations.value[permIndex];
 
-        let potentialSolutions = [];
+                // Standard Solve
+                solveForNumbers(p);
 
-        // one operator
-        for (let y = 0; y < permutation.length; y += 1) {
-            for (let x = 0; x < operators.length; x += 1) {
-                let perm = cloneDeep(permutation);
-                perm.splice(y, 0, operators[x]);
-                potentialSolutions.push(perm);
+                // Concatenation Solve
+                if (options.allowConcatenation) {
+                    if (p.length > 1) solveForNumbers([ p[0] + p[1], ...p.slice(2) ]);
+                    if (p.length > 2) solveForNumbers([ p[0], p[1] + p[2], ...p.slice(3) ]);
+                    if (p.length > 3) solveForNumbers([ ...p.slice(0, 2), p[2] + p[3] ]);
+                    if (p.length === 4) solveForNumbers([ p[0] + p[1], p[2] + p[3] ]);
+                }
+
+                permIndex++;
+                processedCount.value++;
             }
-        }
 
-        // two operator
-        for (let y = 0; y < permutation.length; y += 1) {
-            for (let x = 0; x < operators.length; x += 1) {
-                let perm = cloneDeep(permutation);
-                perm.splice(y, 0, operators[x]);
-                perm.splice(y+2, 0, operators[x]);
-                potentialSolutions.push(perm);
-            }
-        }
-
-        // three operator
-        for (let y = 0; y < permutation.length; y += 1) {
-            for (let x = 0; x < operators.length; x += 1) {
-                let perm = cloneDeep(permutation);
-                perm.splice(y, 0, operators[x]);
-                perm.splice(y+2, 0, operators[x]);
-                perm.splice(y+4, 0, operators[x]);
-                potentialSolutions.push(perm);
-            }
-        }
-
-        // four operator
-        for (let y = 0; y < permutation.length; y += 1) {
-            for (let x = 0; x < operators.length; x += 1) {
-                let perm = cloneDeep(permutation);
-                perm.splice(y, 0, operators[x]);
-                perm.splice(y+2, 0, operators[x]);
-                perm.splice(y+4, 0, operators[x]);
-                perm.splice(y+6, 0, operators[x]);
-                potentialSolutions.push(cloneDeep(perm));
-            }
-        }
-
-        // console.log('poten', potentialSolutions);
-
-        potentialSolutions.forEach(solution => {
-
-            tryEquation(solution.join(''));
-
-            // superfluous operators
-            tryEquation(solution.join('').replace('1', '-1'));
-            tryEquation(solution.join('').replace('4', '-4'));
-            tryEquation(solution.join('').replace('6', '-6'));
-            tryEquation(solution.join('').replace('8', '-8'));
-            tryEquation(solution.join('').replace('1', '+1'));
-            tryEquation(solution.join('').replace('4', '+4'));
-            tryEquation(solution.join('').replace('6', '+6'));
-            tryEquation(solution.join('').replace('8', '+8'));
-            tryEquation(solution.join('').replace('1', '*1'));
-            tryEquation(solution.join('').replace('4', '*4'));
-            tryEquation(solution.join('').replace('6', '*6'));
-            tryEquation(solution.join('').replace('8', '*8'));
-            tryEquation(solution.join('').replace('1', '/1'));
-            tryEquation(solution.join('').replace('4', '/4'));
-            tryEquation(solution.join('').replace('6', '/6'));
-            tryEquation(solution.join('').replace('8', '/8'));
-            tryEquation(solution.join('').replace('1', '^1'));
-            tryEquation(solution.join('').replace('4', '^4'));
-            tryEquation(solution.join('').replace('6', '^6'));
-            tryEquation(solution.join('').replace('8', '^8'));
-
-            // roots
-            tryEquation(solution.join('').replace('1', 'sqrt(1)'));
-            tryEquation(solution.join('').replace('4', 'sqrt(4)'));
-            tryEquation(solution.join('').replace('6', 'sqrt(6)'));
-            tryEquation(solution.join('').replace('8', 'sqrt(8)'));
-
-            // factorials
-            tryEquation(solution.join('').replace('1', '1!'));
-            tryEquation(solution.join('').replace('4', '4!'));
-            tryEquation(solution.join('').replace('6', '6!'));
-            tryEquation(solution.join('').replace('8', '8!'));
+            // Return true if we should continue processing
+            const shouldContinue = permIndex < totalPermutations && !(options.stopOnTarget && targetFoundFlag.value);
+            resolve(shouldContinue);
         });
+    };
 
-        // superfluous operators
-        tryEquation(equation.replace('1', '-1'));
-        tryEquation(equation.replace('4', '-4'));
-        tryEquation(equation.replace('6', '-6'));
-        tryEquation(equation.replace('8', '-8'));
-        tryEquation(equation.replace('1', '+1'));
-        tryEquation(equation.replace('4', '+4'));
-        tryEquation(equation.replace('6', '+6'));
-        tryEquation(equation.replace('8', '+8'));
-        tryEquation(equation.replace('1', '*1'));
-        tryEquation(equation.replace('4', '*4'));
-        tryEquation(equation.replace('6', '*6'));
-        tryEquation(equation.replace('8', '*8'));
-        tryEquation(equation.replace('1', '/1'));
-        tryEquation(equation.replace('4', '/4'));
-        tryEquation(equation.replace('6', '/6'));
-        tryEquation(equation.replace('8', '/8'));
-        tryEquation(equation.replace('1', '^1'));
-        tryEquation(equation.replace('4', '^4'));
-        tryEquation(equation.replace('6', '^6'));
-        tryEquation(equation.replace('8', '^8'));
+    const runBatches = async () => {
+        let hasMore = true;
+        while (hasMore && state.value === COMPUTING) {
+            hasMore = await processBatch();
+            await new Promise(r => setTimeout(r, 0));
+        }
+        state.value = COMPLETE;
+    };
 
-        // roots
-        tryEquation(equation.replace('1', 'sqrt(1)'));
-        tryEquation(equation.replace('4', 'sqrt(4)'));
-        tryEquation(equation.replace('6', 'sqrt(6)'));
-        tryEquation(equation.replace('8', 'sqrt(8)'));
-
-        // factorials
-        tryEquation(equation.replace('1', '1!'));
-        tryEquation(equation.replace('4', '4!'));
-        tryEquation(equation.replace('6', '6!'));
-        tryEquation(equation.replace('8', '8!'));
-
-        operators.forEach(operator => {
-            if (operator === '(' || operator === ')') {
-                tryEquation(equation.replaceAll('(', '').replaceAll(')', ''));
-            } else {
-                tryEquation(equation.replaceAll(operator, ''));
-            }
-        });
-    });
-
-    state.value = COMPLETE;
+    runBatches();
 };
 
 const sortedAnswers = computed(() => {
-    const ans = answers.value.reduce((acc, solution) => {
-        // console.log('solution', solution);
-        if (acc[solution.answer]) {
-            acc[solution.answer].push(solution.equation);
-        } else {
-            acc[solution.answer] = [solution.equation];
+    const ans = {};
+    for (const sol of answers.value) {
+        if (!ans[sol.answer]) ans[sol.answer] = [];
+        if (!ans[sol.answer].includes(sol.equation)) {
+            ans[sol.answer].push(sol.equation);
         }
-        return acc;
-    }, {});
-
-    const sortedAns = Object.keys(ans).sort((a, b) => (a - b)).reduce((acc, key) => {
-        acc.push({ answer: key, equations: ans[key] });
-        return acc;
-    }, []);
-
-    return sortedAns;
+    }
+    return Object.keys(ans).map(Number).sort((a, b) => a - b).map(key => ({ answer: key, equations: ans[key] }));
 });
 </script>
 
 <template>
     <div class="w-full max-w-[1024px] mx-auto p-8">
         <div class="bg-gray-200 rounded-xl shadow-lg border p-8">
-            <h1 class="text-3xl text-gray-700 font-bold">
-                Find Equals
-            </h1>
+            <h1 class="text-3xl text-gray-700 font-bold">Find Equals</h1>
 
-            <p class="text-gray-500 text-lg pt-4">
-                Enter the numbers you need to use
-            </p>
-
-            <div class="flex items-center flex-wrap gap-4 pt-2">
-                <div v-for="(num, index) in options.inputs" :key="`input-${index}`" class="">
-                    <input
-                        v-model="num.value"
-                        type="number"
-                        class="w-24 border rounded-md px-4 py-1"
-                        placeholder="Enter number"
-                    >
+            <div class="flex items-center flex-wrap gap-4 pt-4">
+                <div v-for="(num, index) in options.inputs" :key="`input-${index}`">
+                    <input v-model="num.value" type="number" class="w-24 border rounded-md px-4 py-1" placeholder="#">
                 </div>
+                <button type="button" class="text-blue-600 font-bold" @click="addInput">+ Add Input</button>
+            </div>
 
-                <div class="">
-                    <button type="button" class="flex items-center gap-2" @click="addInput">
-                        <i class="fas fa-plus"></i>
-                        Add Input
-                    </button>
+            <div class="flex flex-wrap gap-6 pt-4 items-end">
+                <div>
+                    <span class="block text-gray-500 text-sm">Target</span>
+                    <input v-model="options.targetAnswer" type="number" class="w-32 border rounded-md px-4 py-1 font-bold">
+                </div>
+                <div>
+                     <span class="block text-gray-500 text-sm">Max Results</span>
+                     <input v-model="options.maxResults" type="number" class="w-24 border rounded-md px-4 py-1">
+                </div>
+                <div class="flex flex-col justify-center">
+                    <label class="flex items-center gap-2 cursor-pointer select-none">
+                        <input v-model="options.stopOnTarget" type="checkbox" class="w-5 h-5 text-green-600"> 
+                        <span class="font-bold text-gray-700">Stop when target found</span>
+                    </label>
                 </div>
             </div>
 
-            <p class="text-gray-500 text-lg pt-4">
-                Target answer
-            </p>
+            <div class="flex flex-wrap gap-6 pt-4 border-t border-gray-300 mt-4">
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input v-model="options.allowDecimals" type="checkbox"> <span>Decimals</span>
+                </label>
+                 <label class="flex items-center gap-2 cursor-pointer">
+                    <input v-model="options.allowConcatenation" type="checkbox">
+                    <span>Combine Numbers (8 & 1 -> 81)</span>
+                </label>
+            </div>
 
-            <div class="flex items-center flex-wrap gap-4 pt-2">
-                <input
-                    v-model="options.targetAnswer"
-                    type="number"
-                    class="w-48 border rounded-md px-4 py-1"
-                    placeholder="Enter number"
+            <div class="pt-6">
+                <button
+                    type="button"
+                    :disabled="isComputing"
+                    class="bg-green-500 hover:bg-green-600 text-white font-bold rounded-md px-6 py-2 disabled:opacity-50 w-full md:w-auto" 
+                    @click="handleGenerate"
                 >
-            </div>
-
-            <p class="text-gray-500 text-lg pt-4">
-                Options
-            </p>
-
-            <div class="flex gap-4 pt-2">
-                <div class="flex items-center gap-2">
-                    <span>Min answer</span>
-                    <input
-                        v-model="options.minAnswer"
-                        type="number"
-                        class="w-24 border rounded-md px-4 py-1"
-                        placeholder="eg: 1"
-                    >
-                </div>
-
-                <div class="flex items-center gap-2">
-                    <span>Max answer</span>
-                    <input
-                        v-model="options.maxAnswer"
-                        type="number"
-                        class="w-24 border rounded-md px-4 py-1"
-                        placeholder="eg: 100"
-                    >
-                </div>
-
-                <div class="flex items-center gap-2">
-                    <span>Allow decimals</span>
-                    <input
-                        v-model="options.allowDecimals"
-                        type="checkbox"
-                    >
-                </div>
-            </div>
-
-            <div class="pt-4">
-                <button type="button" class="bg-green-500 rounded-md px-4 py-1" @click="handleGenerate">Generate</button>
+                    {{ isComputing ? (targetFoundFlag ? 'Target Found! Finishing...' : 'Calculating...') : 'Start Generator' }}
+                </button>
             </div>
         </div>
 
-        <div class="w-full flex flex-col gap-2 p-8">
-            <h1 class="text-3xl text-gray-700 font-bold">
-                Results
-            </h1>
-
-            <span>INPUTS: {{ availableNumbers }}</span>
-            <span>OPTIONS: {{ options }}</span>
-            <span>FOUND: {{ isTargetFound }}</span>
-            <span>TOTAL PERMUTATIONS: {{ cycles }}</span>
-            <span>VALID PERMUTATIONS: {{ permutations.length }}</span>
-            <span>VALID EQUATIONS FOUND: {{ validEquationsFound }}</span>
-            <span>STATE: {{ state }}</span>
-
-            <div class="flex items-center justify-between pt-4">
-                <h1 class="text-3xl text-gray-700 font-bold">
-                    Answers <template v-if="Object.keys(sortedAnswers).length">({{ Object.keys(sortedAnswers).length }})</template>
-                </h1>
-
-                <div class="flex items-center gap-2">
-                    <span>Show equations</span>
-                    <input
-                        v-model="options.showEquations"
-                        type="checkbox"
-                    >
+        <div class="mt-8">
+             <div v-if="isComputing" class="w-full bg-gray-200 rounded-full h-4 mb-4 overflow-hidden relative">
+                <div class="bg-blue-600 h-full transition-all duration-200" :style="{ width: (processedCount / permutations.length * 100) + '%' }"></div>
+                <div class="absolute inset-0 flex items-center justify-center text-xs text-white font-bold drop-shadow-md">
+                    {{ Math.round(processedCount / permutations.length * 100) }}% Scanned
                 </div>
             </div>
-            <!-- {{ sortedAnswers }} -->
-            <div v-if="isComplete" class="w-full flex flex-col gap-4">
-                <div
+
+            <div v-if="isTargetFound" class="bg-green-100 border border-green-500 text-green-800 px-4 py-3 rounded mb-4 flex justify-between items-center">
+                <span class="font-bold flex items-center gap-2">
+                    <i class="fas fa-check-circle"></i> TARGET {{ options.targetAnswer }} FOUND!
+                </span>
+                <span class="text-sm">Stopping early to save memory.</span>
+            </div>
+
+            <div v-if="sortedAnswers.length" class="flex flex-col gap-3">
+                 <div
                     v-for="({ answer, equations }) in sortedAnswers"
-                    :key="`answer-${answer}`"
-                    class="grid grid-cols-[1fr_3fr] gap-2 bg-green-100 rounded-md shadow-lg p-2"
+                    :key="answer"
+                    class="bg-green-50 rounded-md border border-green-200 p-3"
+                    :class="{ 'bg-yellow-100 border-yellow-400 shadow-md ring-2 ring-yellow-300': answer === options.targetAnswer }"
                 >
-                    <div class="text-xl font-semibold">Answer: {{ answer }}</div>
-                    <div class="text-xl font-semibold">Equations: {{ options.showEquations ? equations : equations.length }}</div>
+                    <div class="font-bold text-lg mb-1 flex justify-between">
+                        <span>Answer: {{ answer }}</span>
+                        <span v-if="answer === options.targetAnswer" class="text-xs bg-yellow-400 text-yellow-900 px-2 py-1 rounded">MATCH</span>
+                    </div>
+                    <div class="text-sm text-gray-600 flex flex-wrap gap-2">
+                        <span v-for="eq in (options.showEquations ? equations : equations.slice(0,10))" :key="eq" class="bg-white px-2 py-1 rounded border shadow-sm font-mono text-xs md:text-sm">{{ eq }}</span>
+                        <span v-if="!options.showEquations && equations.length > 10" class="italic pt-1 text-xs">...and {{ equations.length - 10 }} more</span>
+                    </div>
                 </div>
             </div>
 
-            <div v-else-if="isComputing" class="">
-                Computing...
-            </div>
-
-            <div v-else class="">
-                Press Generate to find equations.
+            <div v-else-if="state === COMPLETE && !isTargetFound" class="text-center text-gray-500 py-12 bg-gray-50 rounded border border-dashed">
+                <p class="text-xl font-bold text-gray-400">No solutions found</p>
+                <p class="text-sm">Try enabling Decimals or Concatenation</p>
             </div>
         </div>
     </div>
