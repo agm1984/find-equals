@@ -49,3 +49,10 @@ Standard left-to-right math struggles to find this. However, by using structural
 ```math
 ((1 + 8) ^ sqrt(4)) - 6 = 75
 ```
+
+## How to install
+
+```bash
+$ npm install
+$ npm run dev
+```

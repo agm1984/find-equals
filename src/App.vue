@@ -41,6 +41,17 @@ const addInput = () => {
 
 const isTargetFound = computed(() => targetFoundFlag.value);
 
+const hasValidInputs = computed(() => {
+    if (options.inputs.length === 0) return false;
+    return options.inputs.every(input =>
+        input.value !== '' &&
+        input.value !== null &&
+        !isNaN(Number(input.value))
+    );
+});
+
+const canGenerate = computed(() => hasValidInputs.value && !isComputing.value);
+
 /**
  * 1. Evaluate Equation
  */
@@ -239,7 +250,13 @@ const sortedAnswers = computed(() => {
 
             <div class="flex items-center flex-wrap gap-4 pt-4">
                 <div v-for="(num, index) in options.inputs" :key="`input-${index}`">
-                    <input v-model="num.value" type="number" class="w-24 border rounded-md px-4 py-1" placeholder="#">
+                    <input
+                        v-model="num.value"
+                        type="number"
+                        class="w-24 border rounded-md px-4 py-1"
+                        :class="{ 'border-red-500 bg-red-50': num.value === '' || num.value === null || isNaN(Number(num.value)) }"
+                        placeholder="#"
+                    >
                 </div>
                 <button type="button" class="text-blue-600 font-bold" @click="addInput">+ Add Input</button>
             </div>
@@ -248,6 +265,14 @@ const sortedAnswers = computed(() => {
                 <div>
                     <span class="block text-gray-500 text-sm">Target</span>
                     <input v-model="options.targetAnswer" type="number" class="w-32 border rounded-md px-4 py-1 font-bold">
+                </div>
+                <div>
+                    <span class="block text-gray-500 text-sm">Min Answer</span>
+                    <input v-model="options.minAnswer" type="number" class="w-20 border rounded-md px-4 py-1">
+                </div>
+                <div>
+                    <span class="block text-gray-500 text-sm">Max Answer</span>
+                    <input v-model="options.maxAnswer" type="number" class="w-20 border rounded-md px-4 py-1">
                 </div>
                 <div>
                      <span class="block text-gray-500 text-sm">Max Results</span>
@@ -269,25 +294,30 @@ const sortedAnswers = computed(() => {
                     <input v-model="options.allowConcatenation" type="checkbox">
                     <span>Combine Numbers (8 & 1 -> 81)</span>
                 </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input v-model="options.showEquations" type="checkbox">
+                    <span>Show All Equations</span>
+                </label>
             </div>
 
             <div class="pt-6">
                 <button
                     type="button"
-                    :disabled="isComputing"
-                    class="bg-green-500 hover:bg-green-600 text-white font-bold rounded-md px-6 py-2 disabled:opacity-50 w-full md:w-auto" 
+                    :disabled="!canGenerate"
+                    class="bg-green-500 hover:bg-green-600 text-white font-bold rounded-md px-6 py-2 disabled:opacity-50 w-full md:w-auto"
                     @click="handleGenerate"
                 >
                     {{ isComputing ? (targetFoundFlag ? 'Target Found! Finishing...' : 'Calculating...') : 'Start Generator' }}
                 </button>
+                <span v-if="!hasValidInputs && !isComputing" class="text-red-500 text-sm ml-4">Please enter valid numbers</span>
             </div>
         </div>
 
         <div class="mt-8">
              <div v-if="isComputing" class="w-full bg-gray-200 rounded-full h-4 mb-4 overflow-hidden relative">
-                <div class="bg-blue-600 h-full transition-all duration-200" :style="{ width: (processedCount / permutations.length * 100) + '%' }"></div>
+                <div class="bg-blue-600 h-full transition-all duration-200" :style="{ width: (permutations.length ? (processedCount / permutations.length * 100) : 0) + '%' }"></div>
                 <div class="absolute inset-0 flex items-center justify-center text-xs text-white font-bold drop-shadow-md">
-                    {{ Math.round(processedCount / permutations.length * 100) }}% Scanned
+                    {{ permutations.length ? Math.round(processedCount / permutations.length * 100) : 0 }}% Scanned
                 </div>
             </div>
 
