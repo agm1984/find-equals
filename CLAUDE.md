@@ -24,9 +24,9 @@ Find Equals is a Vue 3 + Vite application that solves numerical puzzles (Countdo
 ### Solver Algorithm Flow
 
 1. **Permutation Generation** - `getPermutations()` generates all orderings of input numbers using Heap's algorithm. Note: `getPermutations()` mutates its input array in place.
-2. **Operator Looping** - `solveForNumbers()` iterates through all operator combinations (`+`, `-`, `*`, `/`, `^`) via the `operatorCombinations()` generator
+2. **Operator Looping** - `solveForNumbers()` iterates through all combinations of the user-enabled binary operators (defined in the `binaryOperators` reactive list: `+`, `-`, `*`, `/`, `^`, `mod`) via the `operatorCombinations()` generator. Operator symbols are inserted verbatim into equation strings, so word operators like `mod` include their own surrounding spaces.
 3. **Structural Templates** - `applyTemplates()` applies parentheses groupings based on operand count (flat, grouped, nested). **Templates are hardcoded for 1-4 operands only** - operand lists of 5+ produce no equations, so adding inputs beyond 4 silently does nothing unless concatenation reduces the count.
-4. **Unary Variations** - `applyUnary()` tests factorial (`x!`) and square root (`sqrt(x)`) substitutions on each number, using precomputed regexes with digit-boundary lookarounds so `1` doesn't match inside `81`
+4. **Unary Variations** - `applyUnary()` tests user-enabled unary substitutions on each number (defined in the `unaryOperators` reactive list: `sqrt`, factorial, `cbrt`, `n^2`, `ln`, `log10`, negation), using precomputed regexes with digit-boundary lookarounds so `1` doesn't match inside `81`. Wrapped forms are parenthesized where needed to stay atomic in surrounding expressions.
 5. **Evaluation** - `tryEquation()` evaluates expressions using `mathjs` and filters results by constraints (finite, decimals allowed or not, min/max range, max results cap). Target matches use a float tolerance, bypass the min/max/decimal constraints, and are unshifted to the top of results.
 
 ### Non-Blocking Execution

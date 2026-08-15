@@ -36,15 +36,39 @@ const options = reactive({
 
 const availableNumbers = computed(() => options.inputs.map(x => x.value));
 const permutations = ref([]);
-const operators = ['+', '-', '*', '/', '^'];
+
+// Binary operators go between operands. Symbols are inserted verbatim into
+// equations, so word operators like mod carry their own spacing.
+const binaryOperators = reactive([
+    { symbol: '+', label: '+', enabled: true },
+    { symbol: '-', label: '-', enabled: true },
+    { symbol: '*', label: '*', enabled: true },
+    { symbol: '/', label: '/', enabled: true },
+    { symbol: '^', label: '^', enabled: true },
+    { symbol: ' mod ', label: 'mod', enabled: false },
+]);
+
+// Unary operators wrap a single operand. Wrapped forms are parenthesized
+// where needed so they stay atomic inside any surrounding expression.
+const unaryOperators = reactive([
+    { key: 'sqrt', label: 'sqrt(n)', wrap: v => `sqrt(${v})`, enabled: true },
+    { key: 'factorial', label: 'n!', wrap: v => `${v}!`, enabled: true },
+    { key: 'cbrt', label: 'cbrt(n)', wrap: v => `cbrt(${v})`, enabled: false },
+    { key: 'square', label: 'n^2', wrap: v => `(${v}^2)`, enabled: false },
+    { key: 'ln', label: 'ln(n)', wrap: v => `log(${v})`, enabled: false },
+    { key: 'log10', label: 'log10(n)', wrap: v => `log10(${v})`, enabled: false },
+    { key: 'negate', label: '-n', wrap: v => `(-${v})`, enabled: false },
+]);
+
+const enabledBinaryOps = computed(() => binaryOperators.filter(op => op.enabled).map(op => op.symbol));
 
 /**
- * Generator that yields all operator combinations for a given count.
+ * Generator that yields all combinations of the given operators for a given count.
  * For count=2, yields ['+'], ['-'], ['*'], ...
  * For count=3, yields ['+', '+'], ['+', '-'], ...
  */
-function* operatorCombinations(count) {
-    if (count <= 1) return;
+function* operatorCombinations(count, operators) {
+    if (count <= 1 || operators.length === 0) return;
     const numOps = count - 1;
     const indices = new Array(numOps).fill(0);
 
@@ -78,8 +102,7 @@ const unaryPatterns = computed(() => {
         .map(val => ({
             val,
             regex: new RegExp(`(?<!\\d)${val}(?!\\d)`, 'g'),
-            factorial: `${val}!`,
-            sqrt: `sqrt(${val})`
+            replacements: unaryOperators.filter(op => op.enabled).map(op => op.wrap(val)),
         }));
 });
 
@@ -103,7 +126,9 @@ const hasValidInputs = computed(() => {
     );
 });
 
-const canGenerate = computed(() => hasValidInputs.value && !isComputing.value);
+const hasOperatorsSelected = computed(() => enabledBinaryOps.value.length > 0 || options.inputs.length <= 1);
+
+const canGenerate = computed(() => hasValidInputs.value && hasOperatorsSelected.value && !isComputing.value);
 
 /**
  * 1. Evaluate Equation
@@ -163,9 +188,10 @@ const applyTemplates = (nums, ops) => {
             if (pattern.regex.test(eq)) {
                 // Reset regex lastIndex since we're using 'g' flag
                 pattern.regex.lastIndex = 0;
-                tryEquation(eq.replace(pattern.regex, pattern.factorial));
-                pattern.regex.lastIndex = 0;
-                tryEquation(eq.replace(pattern.regex, pattern.sqrt));
+                for (const replacement of pattern.replacements) {
+                    tryEquation(eq.replace(pattern.regex, replacement));
+                    pattern.regex.lastIndex = 0;
+                }
             }
             pattern.regex.lastIndex = 0;
         }
@@ -201,11 +227,11 @@ const solveForNumbers = (numberList) => {
     const len = numberList.length;
 
     if (len === 1) {
-        tryEquation(numberList[0]);
+        applyTemplates(numberList, []);
         return;
     }
 
-    for (const ops of operatorCombinations(len)) {
+    for (const ops of operatorCombinations(len, enabledBinaryOps.value)) {
         if (targetFoundFlag.value && options.stopOnTarget) return;
         applyTemplates(numberList, ops);
     }
@@ -339,6 +365,23 @@ const sortedAnswers = computed(() => {
                 </div>
             </div>
 
+            <div class="pt-4 border-t border-gray-300 mt-4">
+                <span class="block text-gray-500 text-sm mb-2">Operators (between numbers)</span>
+                <div class="flex flex-wrap gap-4">
+                    <label v-for="op in binaryOperators" :key="op.symbol" class="flex items-center gap-2 cursor-pointer">
+                        <input v-model="op.enabled" type="checkbox">
+                        <span class="font-mono font-bold">{{ op.label }}</span>
+                    </label>
+                </div>
+                <span class="block text-gray-500 text-sm mb-2 mt-4">Functions (applied to a single number)</span>
+                <div class="flex flex-wrap gap-4">
+                    <label v-for="op in unaryOperators" :key="op.key" class="flex items-center gap-2 cursor-pointer">
+                        <input v-model="op.enabled" type="checkbox">
+                        <span class="font-mono">{{ op.label }}</span>
+                    </label>
+                </div>
+            </div>
+
             <div class="flex flex-wrap gap-6 pt-4 border-t border-gray-300 mt-4">
                 <label class="flex items-center gap-2 cursor-pointer">
                     <input v-model="options.allowDecimals" type="checkbox"> <span>Decimals</span>
@@ -367,6 +410,7 @@ const sortedAnswers = computed(() => {
                     {{ isComputing ? (targetFoundFlag ? 'Target Found! Finishing...' : 'Calculating...') : 'Start Generator' }}
                 </button>
                 <span v-if="!hasValidInputs && !isComputing" class="text-red-500 text-sm ml-4">Please enter valid numbers</span>
+                <span v-else-if="!hasOperatorsSelected && !isComputing" class="text-red-500 text-sm ml-4">Select at least one operator</span>
             </div>
         </div>
 
