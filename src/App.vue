@@ -3,6 +3,12 @@ import { ref, reactive, computed } from 'vue';
 import { evaluate } from 'mathjs'
 import { getPermutations, cycles } from './utils/permutations';
 
+// Configuration constants
+const BATCH_TIME_MS = 15;
+const FLOAT_TOLERANCE = 0.000001;
+const EQUATIONS_PREVIEW_COUNT = 10;
+const DEFAULT_MAX_RESULTS = 2000;
+
 const INITIAL = 'is-initial';
 const COMPUTING = 'is-computing';
 const COMPLETE = 'is-complete';
@@ -23,13 +29,59 @@ const options = reactive({
     allowDecimals: false,
     allowConcatenation: true,
     showEquations: false,
-    maxResults: 2000, 
+    maxResults: DEFAULT_MAX_RESULTS,
     stopOnTarget: true, // NEW: Defaults to true
 });
 
 const availableNumbers = computed(() => options.inputs.map(x => x.value));
 const permutations = ref([]);
 const operators = ['+', '-', '*', '/', '^'];
+
+/**
+ * Generator that yields all operator combinations for a given count.
+ * For count=2, yields ['+'], ['-'], ['*'], ...
+ * For count=3, yields ['+', '+'], ['+', '-'], ...
+ */
+function* operatorCombinations(count) {
+    if (count <= 1) return;
+    const numOps = count - 1;
+    const indices = new Array(numOps).fill(0);
+
+    while (true) {
+        yield indices.map(i => operators[i]);
+
+        // Increment indices like a counter (rightmost first)
+        let pos = numOps - 1;
+        while (pos >= 0) {
+            indices[pos]++;
+            if (indices[pos] < operators.length) break;
+            indices[pos] = 0;
+            pos--;
+        }
+        if (pos < 0) break;
+    }
+}
+
+// Precomputed regex patterns for unary substitutions.
+// Pattern uses negative lookbehind/lookahead (?<!\d) and (?!\d) to match whole numbers only,
+// preventing partial matches like "81" matching the digit "1" in a concatenated number.
+const unaryPatterns = computed(() => {
+    const seen = new Set();
+    return options.inputs
+        .map(input => String(input.value))
+        .filter(val => {
+            if (seen.has(val)) return false;
+            seen.add(val);
+            return true;
+        })
+        .map(val => ({
+            val,
+            regex: new RegExp(`(?<!\\d)${val}(?!\\d)`, 'g'),
+            factorial: `${val}!`,
+            sqrt: `sqrt(${val})`
+        }));
+});
+
 const answers = ref([]);
 const validEquationsFound = ref(0);
 const processedCount = ref(0);
@@ -67,7 +119,7 @@ const tryEquation = (equation) => {
 
         // CHECK TARGET FIRST (Before checking maxResults)
         // This ensures we don't give up searching for "75" just because we found 1000 "74s"
-        if (Math.abs(answer - options.targetAnswer) < 0.000001) {
+        if (Math.abs(answer - options.targetAnswer) < FLOAT_TOLERANCE) {
              answers.value.unshift({ equation, answer }); // Put it at the top!
              validEquationsFound.value += 1;
              targetFoundFlag.value = true; // Signal to stop
@@ -99,21 +151,23 @@ const applyTemplates = (nums, ops) => {
     const N = nums;
     const O = ops;
 
-    // Helper to apply regex variations (factorials/roots)
+    // Helper to apply regex variations (factorials/roots) using precomputed patterns
     const applyUnary = (eq) => {
         tryEquation(eq);
 
         // Only run expensive regex if we haven't found target yet
         if (targetFoundFlag.value && options.stopOnTarget) return;
 
-        options.inputs.forEach(input => {
-            const val = String(input.value);
-            const regex = new RegExp(`(?<!\\d)${val}(?!\\d)`, 'g');
-            if (eq.match(regex)) {
-                tryEquation(eq.replace(regex, `${val}!`));
-                tryEquation(eq.replace(regex, `sqrt(${val})`));
+        for (const pattern of unaryPatterns.value) {
+            if (pattern.regex.test(eq)) {
+                // Reset regex lastIndex since we're using 'g' flag
+                pattern.regex.lastIndex = 0;
+                tryEquation(eq.replace(pattern.regex, pattern.factorial));
+                pattern.regex.lastIndex = 0;
+                tryEquation(eq.replace(pattern.regex, pattern.sqrt));
             }
-        });
+            pattern.regex.lastIndex = 0;
+        }
     }
 
     // Dynamic Templates based on array length
@@ -138,7 +192,7 @@ const applyTemplates = (nums, ops) => {
 };
 
 /**
- * 3. Operator Looper
+ * 3. Operator Looper - iterates through all operator combinations using generator
  */
 const solveForNumbers = (numberList) => {
     if (targetFoundFlag.value && options.stopOnTarget) return;
@@ -150,18 +204,9 @@ const solveForNumbers = (numberList) => {
         return;
     }
 
-    if (len === 2) {
-        for (let op1 of operators) applyTemplates(numberList, [op1]);
-    } else if (len === 3) {
-        for (let op1 of operators) {
-            for (let op2 of operators) applyTemplates(numberList, [op1, op2]);
-        }
-    } else if (len === 4) {
-        for (let op1 of operators) {
-            for (let op2 of operators) {
-                for (let op3 of operators) applyTemplates(numberList, [op1, op2, op3]);
-            }
-        }
+    for (const ops of operatorCombinations(len)) {
+        if (targetFoundFlag.value && options.stopOnTarget) return;
+        applyTemplates(numberList, ops);
     }
 };
 
@@ -192,7 +237,7 @@ const handleGenerate = async () => {
             // 3. We haven't found the target (if stopOnTarget is on)
             while (
                 permIndex < totalPermutations && 
-                (performance.now() - startTime < 15) &&
+                (performance.now() - startTime < BATCH_TIME_MS) &&
                 !(options.stopOnTarget && targetFoundFlag.value)
             ) {
 
@@ -233,9 +278,14 @@ const handleGenerate = async () => {
 
 const sortedAnswers = computed(() => {
     const ans = {};
+    const seen = {}; // Use Sets for O(1) duplicate checks
     for (const sol of answers.value) {
-        if (!ans[sol.answer]) ans[sol.answer] = [];
-        if (!ans[sol.answer].includes(sol.equation)) {
+        if (!ans[sol.answer]) {
+            ans[sol.answer] = [];
+            seen[sol.answer] = new Set();
+        }
+        if (!seen[sol.answer].has(sol.equation)) {
+            seen[sol.answer].add(sol.equation);
             ans[sol.answer].push(sol.equation);
         }
     }
@@ -340,8 +390,8 @@ const sortedAnswers = computed(() => {
                         <span v-if="answer === options.targetAnswer" class="text-xs bg-yellow-400 text-yellow-900 px-2 py-1 rounded">MATCH</span>
                     </div>
                     <div class="text-sm text-gray-600 flex flex-wrap gap-2">
-                        <span v-for="eq in (options.showEquations ? equations : equations.slice(0,10))" :key="eq" class="bg-white px-2 py-1 rounded border shadow-sm font-mono text-xs md:text-sm">{{ eq }}</span>
-                        <span v-if="!options.showEquations && equations.length > 10" class="italic pt-1 text-xs">...and {{ equations.length - 10 }} more</span>
+                        <span v-for="eq in (options.showEquations ? equations : equations.slice(0, EQUATIONS_PREVIEW_COUNT))" :key="eq" class="bg-white px-2 py-1 rounded border shadow-sm font-mono text-xs md:text-sm">{{ eq }}</span>
+                        <span v-if="!options.showEquations && equations.length > EQUATIONS_PREVIEW_COUNT" class="italic pt-1 text-xs">...and {{ equations.length - EQUATIONS_PREVIEW_COUNT }} more</span>
                     </div>
                 </div>
             </div>
