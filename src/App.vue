@@ -28,6 +28,7 @@ const options = reactive({
     maxAnswer: 100,
     allowDecimals: false,
     allowConcatenation: true,
+    enforceOrder: false,
     showEquations: false,
     maxResults: DEFAULT_MAX_RESULTS,
     stopOnTarget: true, // NEW: Defaults to true
@@ -222,7 +223,9 @@ const handleGenerate = async () => {
     targetFoundFlag.value = false;
 
     const rawOperands = availableNumbers.value.map(String);
-    permutations.value = getPermutations(rawOperands);
+    permutations.value = options.enforceOrder
+        ? [rawOperands.slice()]
+        : getPermutations(rawOperands);
 
     const totalPermutations = permutations.value.length;
     let permIndex = 0;
@@ -343,6 +346,10 @@ const sortedAnswers = computed(() => {
                  <label class="flex items-center gap-2 cursor-pointer">
                     <input v-model="options.allowConcatenation" type="checkbox">
                     <span>Combine Numbers (8 & 1 -> 81)</span>
+                </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input v-model="options.enforceOrder" type="checkbox">
+                    <span>Keep Input Order</span>
                 </label>
                 <label class="flex items-center gap-2 cursor-pointer">
                     <input v-model="options.showEquations" type="checkbox">
