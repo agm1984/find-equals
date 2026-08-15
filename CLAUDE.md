@@ -8,43 +8,45 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run dev` - Start Vite dev server for local development
 - `npm run build` - Create production build in `dist/`
 - `npm run preview` - Serve production build locally
-
-No automated test framework is configured yet. If you add tests, also add the corresponding npm scripts and keep test files close to source (e.g., `src/utils/__tests__/permutations.test.js`).
+- `npm test` - Run the Vitest suite once
+- `npm run test:watch` - Run Vitest in watch mode
+- `npx vitest run src/utils/__tests__/solver.test.js -t "finds 75"` - Run a single test by file and name
 
 ## Architecture Overview
 
 Find Equals is a Vue 3 + Vite application that solves numerical puzzles (Countdown-style): given a set of input numbers and a target value, it brute-forces mathematical equations that produce the target.
 
+The solver is a pure JavaScript module with no dependencies (not even mathjs — evaluation is direct numeric computation, which is what makes the search fast). The UI runs it inside a Web Worker so the main thread stays free.
+
 ### Core Files
 
-- **`src/App.vue`** - Main application containing all solver logic and UI. Uses `<script setup>` composition API.
-- **`src/utils/permutations.js`** - Heap's algorithm implementation for generating permutations. Exports `getPermutations()` and a reactive `cycles` counter (the counter is reset by `App.vue` but no longer incremented; it belonged to the old commented-out recursive implementation).
-- **`src/App-v1.vue`** - Legacy variant of the app; avoid editing unless intentional.
+- **`src/utils/solver.js`** - All solver logic, pure and UI-free. Exports the operator definitions (`BINARY_OPERATORS`, `UNARY_OPERATORS`), the enumeration primitives (`concatenationVariants`, `buildOperandLists`, `forEachExpression`), and `createSearch()`, the incremental search driver.
+- **`src/workers/solver.worker.js`** - Thin Web Worker wrapper: receives a `start` message with a search config, drives `createSearch()` to completion, posts `update` messages (progress + result batches) every ~100ms and a final `done` message. Cancellation is `worker.terminate()` from the main thread.
+- **`src/App.vue`** - UI only: options/toggles, worker lifecycle, results display. Persists all settings to localStorage (`find-equals-settings-v1`).
+- **`src/utils/permutations.js`** - Heap's algorithm. Mutates its input array in place.
+- **`src/utils/__tests__/solver.test.js`** - Vitest coverage of the solver.
 
-### Solver Algorithm Flow
+### Solver Algorithm Flow (all in `createSearch()`)
 
-1. **Permutation Generation** - `getPermutations()` generates all orderings of input numbers using Heap's algorithm. Note: `getPermutations()` mutates its input array in place.
-2. **Operator Looping** - `solveForNumbers()` iterates through all combinations of the user-enabled binary operators (defined in the `binaryOperators` reactive list: `+`, `-`, `*`, `/`, `^`, `mod`) via the `operatorCombinations()` generator. Operator symbols are inserted verbatim into equation strings, so word operators like `mod` include their own surrounding spaces.
-3. **Structural Templates** - `applyTemplates()` applies parentheses groupings based on operand count (flat, grouped, nested). **Templates are hardcoded for 1-4 operands only** - operand lists of 5+ produce no equations, so adding inputs beyond 4 silently does nothing unless concatenation reduces the count.
-4. **Unary Variations** - `applyUnary()` tests user-enabled unary substitutions on each number (defined in the `unaryOperators` reactive list: `sqrt`, factorial, `cbrt`, `n^2`, `ln`, `log10`, negation), using precomputed regexes with digit-boundary lookarounds so `1` doesn't match inside `81`. Wrapped forms are parenthesized where needed to stay atomic in surrounding expressions.
-5. **Evaluation** - `tryEquation()` evaluates expressions using `mathjs` and filters results by constraints (finite, decimals allowed or not, min/max range, max results cap). Target matches use a float tolerance, bypass the min/max/decimal constraints, and are unshifted to the top of results.
+1. **Operand lists** - `buildOperandLists()` produces every operand sequence to solve: permutations of the inputs (or just the declared order when `enforceOrder` is set), each expanded by `concatenationVariants()` (all adjacent digit-merges, e.g. `[8,1,6] -> [81,6], [8,16], [816]`; negatives, decimals, and leading zeros never merge), deduplicated.
+2. **Expression enumeration** - `forEachExpression()` streams every expression tree for an operand list via callbacks: it recursively splits the list into left/right halves (all binary tree shapes — Catalan(n-1) of them), crosses with every enabled binary operator, and layers unary variants on leaves (always) and inner nodes (when `subExpressionFunctions` is on). **Any operand count works** — there are no hardcoded templates.
+3. **Unary variants** - `applyUnaries()` composes unary operators up to `unaryDepth` (e.g. `sqrt(9!)` at depth 2). Applications that don't change the value (`sqrt(1)`, `2!`, `-0`) are pruned; each `apply` guards its own domain (factorial: integers 0-170; sqrt/ln: sign checks).
+4. **Filtering** - `processEquation()` checks the target first (float tolerance, outside the min/max/decimal/cap constraints so the target can never be missed), tracks the 5 nearest distinct misses, then applies constraints and stores.
 
-### Non-Blocking Execution
+Expressions carry `{value, expr, atom}`; `atom` marks self-delimiting expressions (numbers, function calls, factorials) that don't need parens when embedded, which is how display strings stay readable. `mod` follows mathjs semantics (sign of divisor).
 
-The solver uses asynchronous batch processing (`processBatch()`) with 15ms time slices to keep the UI responsive during computation. The `targetFoundFlag` combined with the `stopOnTarget` option enables early termination when the target is found; this flag is checked at every level of the solver (batch loop, operator loop, templates, unary substitution).
+### Search/UI Contract
 
-### Concatenation Mode
-
-When enabled, `handleGenerate()` also solves merged variants of each permutation (adjacent pairs only, e.g., `8` and `1` become `81`). Operands are handled as strings throughout the solver so concatenation is simple string joining.
+`createSearch()` is incremental: each `step()` fully solves one operand list; drain results between steps with `takeNewResults()`. The worker loops `step()` synchronously and batches messages. The UI appends result batches to `answers`, groups/dedupes them in `sortedAnswers`, and always renders target matches (yellow card) while collapsing other answers behind a toggle. Near misses render only when the run completes without finding the target.
 
 ## Code Style
 
 - Vue 3 Single File Components with `<script setup>`
 - JavaScript with single quotes and semicolons
 - 4-space indentation
-- Prefer descriptive, domain-focused names (e.g., `applyTemplates`, `handleGenerate`)
+- Prefer descriptive, domain-focused names (e.g., `buildOperandLists`, `handleGenerate`)
 - Tailwind CSS for styling (utility classes in templates; avoid adding new CSS files)
-- Math evaluation via `mathjs` library; avoid adding heavy compute dependencies without a clear need
+- Keep solver logic in `src/utils/solver.js` (pure, testable, worker-safe: no Vue/DOM imports)
 
 ## Commit Guidelines
 

@@ -1,29 +1,7 @@
-import { ref } from 'vue';
-// import { evaluate } from 'mathjs'
-
-export let cycles = ref(0);
-
-// export const getPermutations = (initialInputs) => {
-//     let result = [];
-
-//     const permute = (arr, m = []) => {
-//         if (arr.length === 0) {
-//             result.push(m);
-//         } else {
-//             for (let i = 0; i < arr.length; i++) {
-//                 cycles.value += 1;
-//                 let curr = arr.slice();
-//                 let next = curr.splice(i, 1);
-//                 permute(curr.slice(), m.concat(next));
-//             }
-//         }
-//    }
-
-//    permute(initialInputs);
-
-//    return result;
-// };
-
+/**
+ * Heap's algorithm. Returns all orderings of the given array.
+ * Note: mutates the input array in place while cycling through swaps.
+ */
 export const getPermutations = (permutation) => {
     const length = permutation.length;
     let result = [permutation.slice()];
